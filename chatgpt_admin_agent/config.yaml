@@ -1,5 +1,5 @@
 name: ChatGPT Admin Agent
-version: "0.1.4"
+version: "0.1.5"
 slug: chatgpt_admin_agent
 description: Local admin bridge for Home Assistant configuration, registry and service operations
 url: https://github.com/tfz02/home-assistant-chatgpt-admin-agent
@@ -26,7 +26,7 @@ options:
   admin_token: "s9h34LVrR!yf8ees9h34LVrR!yf8ees9h34LVrR!yf8ees9h34LVrR!yf8ee"
   allow_shell: true
   allow_storage: true
-  ngrok_enabled: false
+  ngrok_enabled: true
   ngrok_authtoken: "3DGs2HKH7symGhYvckvG0h7xaPE_46hqK5jEaN2B7MGRL9eFf"
   ngrok_domain: "broadcast-gallstone-reforest.ngrok-free.dev"
 schema:
