@@ -9,7 +9,7 @@ from typing import Any, Optional
 import requests
 import uvicorn
 import yaml
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
 
@@ -43,14 +43,17 @@ ADMIN_TOKEN = OPTIONS.get("admin_token", "change-me")
 ALLOW_SHELL = bool(OPTIONS.get("allow_shell", True))
 ALLOW_STORAGE = bool(OPTIONS.get("allow_storage", True))
 
-app = FastAPI(title="ChatGPT Admin Agent", version="0.1.0")
+app = FastAPI(title="ChatGPT Admin Agent", version="0.1.3")
 
 
-def require_auth(x_admin_token: Optional[str]) -> None:
+def require_auth(x_admin_token: Optional[str], token: Optional[str] = None) -> None:
     if not ADMIN_TOKEN or ADMIN_TOKEN == "change-me":
         raise HTTPException(status_code=403, detail="Admin token not configured")
-    if x_admin_token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+    if x_admin_token == ADMIN_TOKEN or token == ADMIN_TOKEN:
+        return
+
+    raise HTTPException(status_code=401, detail="Invalid admin token")
 
 
 def resolve_path(relative_path: str) -> Path:
@@ -130,13 +133,17 @@ def health():
     return {
         "ok": True,
         "name": "ChatGPT Admin Agent",
-        "version": "0.1.0",
+        "version": "0.1.3",
     }
 
 
 @app.post("/fs/read")
-def fs_read(req: FilePathRequest, x_admin_token: Optional[str] = Header(None)):
-    require_auth(x_admin_token)
+def fs_read(
+    req: FilePathRequest,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
 
     path = resolve_path(req.relative_path)
 
@@ -153,8 +160,12 @@ def fs_read(req: FilePathRequest, x_admin_token: Optional[str] = Header(None)):
 
 
 @app.post("/fs/write")
-def fs_write(req: WriteFileRequest, x_admin_token: Optional[str] = Header(None)):
-    require_auth(x_admin_token)
+def fs_write(
+    req: WriteFileRequest,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
 
     path = resolve_path(req.relative_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,8 +182,12 @@ def fs_write(req: WriteFileRequest, x_admin_token: Optional[str] = Header(None))
 
 
 @app.post("/fs/replace")
-def fs_replace(req: ReplaceInFileRequest, x_admin_token: Optional[str] = Header(None)):
-    require_auth(x_admin_token)
+def fs_replace(
+    req: ReplaceInFileRequest,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
 
     path = resolve_path(req.relative_path)
 
@@ -204,8 +219,12 @@ def fs_replace(req: ReplaceInFileRequest, x_admin_token: Optional[str] = Header(
 
 
 @app.post("/fs/grep")
-def fs_grep(req: GrepRequest, x_admin_token: Optional[str] = Header(None)):
-    require_auth(x_admin_token)
+def fs_grep(
+    req: GrepRequest,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
 
     path = resolve_path(req.relative_path)
 
@@ -229,8 +248,12 @@ def fs_grep(req: GrepRequest, x_admin_token: Optional[str] = Header(None)):
 
 
 @app.post("/yaml/validate")
-def yaml_validate(req: FilePathRequest, x_admin_token: Optional[str] = Header(None)):
-    require_auth(x_admin_token)
+def yaml_validate(
+    req: FilePathRequest,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
 
     path = resolve_path(req.relative_path)
 
@@ -243,8 +266,12 @@ def yaml_validate(req: FilePathRequest, x_admin_token: Optional[str] = Header(No
 
 
 @app.post("/json/validate")
-def json_validate(req: FilePathRequest, x_admin_token: Optional[str] = Header(None)):
-    require_auth(x_admin_token)
+def json_validate(
+    req: FilePathRequest,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
 
     path = resolve_path(req.relative_path)
 
@@ -260,8 +287,9 @@ def json_validate(req: FilePathRequest, x_admin_token: Optional[str] = Header(No
 def restore_state_delete_entity(
     req: DeleteRestoreStateRequest,
     x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
 ):
-    require_auth(x_admin_token)
+    require_auth(x_admin_token, token)
 
     if not ALLOW_STORAGE:
         raise HTTPException(status_code=403, detail="Storage access disabled")
@@ -304,8 +332,12 @@ def restore_state_delete_entity(
 
 
 @app.post("/ha/call_service")
-def ha_call_service(req: ServiceRequest, x_admin_token: Optional[str] = Header(None)):
-    require_auth(x_admin_token)
+def ha_call_service(
+    req: ServiceRequest,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
 
     if not SUPERVISOR_TOKEN:
         raise HTTPException(status_code=500, detail="SUPERVISOR_TOKEN missing")
@@ -337,8 +369,11 @@ def ha_call_service(req: ServiceRequest, x_admin_token: Optional[str] = Header(N
 
 
 @app.post("/ha/reload_automations")
-def ha_reload_automations(x_admin_token: Optional[str] = Header(None)):
-    require_auth(x_admin_token)
+def ha_reload_automations(
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
 
     if not SUPERVISOR_TOKEN:
         raise HTTPException(status_code=500, detail="SUPERVISOR_TOKEN missing")
@@ -394,8 +429,12 @@ def run_shell(command: str, cwd: str, timeout: int):
 
 
 @app.post("/shell/exec")
-def shell_exec(req: ShellRequest, x_admin_token: Optional[str] = Header(None)):
-    require_auth(x_admin_token)
+def shell_exec(
+    req: ShellRequest,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
 
     if not ALLOW_SHELL:
         raise HTTPException(status_code=403, detail="Shell access disabled")
@@ -404,19 +443,23 @@ def shell_exec(req: ShellRequest, x_admin_token: Optional[str] = Header(None)):
 
 
 @app.post("/ha/check_config")
-def ha_check_config(x_admin_token: Optional[str] = Header(None)):
-    require_auth(x_admin_token)
+def ha_check_config(
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
 
     if not ALLOW_SHELL:
         raise HTTPException(status_code=403, detail="Shell access disabled")
 
     return run_shell("ha core check", "/config", 120)
 
+
 @app.get("/mcp")
 def mcp_get():
     return {
         "name": "ChatGPT Admin Agent",
-        "version": "0.1.0",
+        "version": "0.1.3",
         "description": "Home Assistant admin MCP endpoint",
         "tools": [
             {
@@ -492,7 +535,11 @@ def mcp_get():
 
 
 @app.post("/mcp")
-async def mcp_post(request: Request, x_admin_token: Optional[str] = Header(None)):
+async def mcp_post(
+    request: Request,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
     body = await request.json()
     method = body.get("method")
     params = body.get("params") or {}
@@ -510,7 +557,7 @@ async def mcp_post(request: Request, x_admin_token: Optional[str] = Header(None)
                     },
                     "serverInfo": {
                         "name": "ChatGPT Admin Agent",
-                        "version": "0.1.0",
+                        "version": "0.1.3",
                     },
                 },
             }
@@ -533,9 +580,10 @@ async def mcp_post(request: Request, x_admin_token: Optional[str] = Header(None)
             }
 
         if method == "tools/call":
-            require_auth(x_admin_token)
+            require_auth(x_admin_token, token)
             name = params.get("name")
             arguments = params.get("arguments") or {}
+            auth_value = x_admin_token or token
 
             if name == "ha_agent_health":
                 result = health()
@@ -543,25 +591,25 @@ async def mcp_post(request: Request, x_admin_token: Optional[str] = Header(None)
             elif name == "ha_agent_replace_in_file":
                 result = fs_replace(
                     ReplaceInFileRequest(**arguments),
-                    x_admin_token=x_admin_token,
+                    x_admin_token=auth_value,
                 )
 
             elif name == "ha_agent_grep_file":
                 result = fs_grep(
                     GrepRequest(**arguments),
-                    x_admin_token=x_admin_token,
+                    x_admin_token=auth_value,
                 )
 
             elif name == "ha_agent_check_config":
-                result = ha_check_config(x_admin_token=x_admin_token)
+                result = ha_check_config(x_admin_token=auth_value)
 
             elif name == "ha_agent_reload_automations":
-                result = ha_reload_automations(x_admin_token=x_admin_token)
+                result = ha_reload_automations(x_admin_token=auth_value)
 
             elif name == "ha_agent_delete_restore_state_entity":
                 result = restore_state_delete_entity(
                     DeleteRestoreStateRequest(**arguments),
-                    x_admin_token=x_admin_token,
+                    x_admin_token=auth_value,
                 )
 
             else:
@@ -598,6 +646,7 @@ async def mcp_post(request: Request, x_admin_token: Optional[str] = Header(None)
                 "message": str(exc),
             },
         }
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8787)
