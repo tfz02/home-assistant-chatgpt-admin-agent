@@ -9,7 +9,7 @@ from typing import Any, Optional
 import requests
 import uvicorn
 import yaml
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 
@@ -412,6 +412,192 @@ def ha_check_config(x_admin_token: Optional[str] = Header(None)):
 
     return run_shell("ha core check", "/config", 120)
 
+@app.get("/mcp")
+def mcp_get():
+    return {
+        "name": "ChatGPT Admin Agent",
+        "version": "0.1.0",
+        "description": "Home Assistant admin MCP endpoint",
+        "tools": [
+            {
+                "name": "ha_agent_health",
+                "description": "Check whether the ChatGPT Admin Agent is reachable.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "ha_agent_replace_in_file",
+                "description": "Replace text in a Home Assistant config file with backup.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "relative_path": {"type": "string"},
+                        "search": {"type": "string"},
+                        "replace": {"type": "string"},
+                        "backup": {"type": "boolean", "default": True},
+                    },
+                    "required": ["relative_path", "search", "replace"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "ha_agent_grep_file",
+                "description": "Search for text in a Home Assistant config file.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "relative_path": {"type": "string"},
+                        "search": {"type": "string"},
+                    },
+                    "required": ["relative_path", "search"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "ha_agent_check_config",
+                "description": "Run Home Assistant configuration check.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "ha_agent_reload_automations",
+                "description": "Reload Home Assistant automations.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "ha_agent_delete_restore_state_entity",
+                "description": "Delete a restored entity from Home Assistant restore state.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "entity_id": {"type": "string"},
+                        "backup": {"type": "boolean", "default": True},
+                    },
+                    "required": ["entity_id"],
+                    "additionalProperties": False,
+                },
+            },
+        ],
+    }
+
+
+@app.post("/mcp")
+async def mcp_post(request: Request, x_admin_token: Optional[str] = Header(None)):
+    body = await request.json()
+    method = body.get("method")
+    params = body.get("params") or {}
+    request_id = body.get("id")
+
+    try:
+        if method == "initialize":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {}
+                    },
+                    "serverInfo": {
+                        "name": "ChatGPT Admin Agent",
+                        "version": "0.1.0",
+                    },
+                },
+            }
+
+        if method == "tools/list":
+            tools = mcp_get()["tools"]
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "tools": [
+                        {
+                            "name": tool["name"],
+                            "description": tool["description"],
+                            "inputSchema": tool["input_schema"],
+                        }
+                        for tool in tools
+                    ]
+                },
+            }
+
+        if method == "tools/call":
+            require_auth(x_admin_token)
+            name = params.get("name")
+            arguments = params.get("arguments") or {}
+
+            if name == "ha_agent_health":
+                result = health()
+
+            elif name == "ha_agent_replace_in_file":
+                result = fs_replace(
+                    ReplaceInFileRequest(**arguments),
+                    x_admin_token=x_admin_token,
+                )
+
+            elif name == "ha_agent_grep_file":
+                result = fs_grep(
+                    GrepRequest(**arguments),
+                    x_admin_token=x_admin_token,
+                )
+
+            elif name == "ha_agent_check_config":
+                result = ha_check_config(x_admin_token=x_admin_token)
+
+            elif name == "ha_agent_reload_automations":
+                result = ha_reload_automations(x_admin_token=x_admin_token)
+
+            elif name == "ha_agent_delete_restore_state_entity":
+                result = restore_state_delete_entity(
+                    DeleteRestoreStateRequest(**arguments),
+                    x_admin_token=x_admin_token,
+                )
+
+            else:
+                raise HTTPException(status_code=404, detail=f"Unknown tool: {name}")
+
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(result, ensure_ascii=False),
+                        }
+                    ]
+                },
+            }
+
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": -32601,
+                "message": f"Unknown method: {method}",
+            },
+        }
+
+    except Exception as exc:
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": -32000,
+                "message": str(exc),
+            },
+        }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8787)
