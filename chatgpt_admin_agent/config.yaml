@@ -1,5 +1,5 @@
 name: ChatGPT Admin Agent
-version: "0.1.0"
+version: "0.1.2"
 slug: chatgpt_admin_agent
 description: Local admin bridge for Home Assistant configuration, registry and service operations
 url: https://github.com/tfz02/home-assistant-chatgpt-admin-agent
