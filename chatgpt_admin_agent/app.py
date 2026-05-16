@@ -27,11 +27,11 @@ ALLOWED_ROOTS = [
     SSL_ROOT,
 ]
 
-SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
-HA_URL = "http://supervisor/core/api"
-SUPERVISOR_URL = "http://supervisor"
 OPTIONS_PATH = Path("/data/options.json")
-AGENT_VERSION = "0.1.7"
+AGENT_VERSION = "0.1.8"
+
+SUPERVISOR_URL = "http://supervisor"
+SUPERVISOR_CORE_API = "http://supervisor/core/api"
 
 
 def load_options() -> dict:
@@ -41,9 +41,29 @@ def load_options() -> dict:
 
 
 OPTIONS = load_options()
+
 ADMIN_TOKEN = OPTIONS.get("admin_token", "change-me")
 ALLOW_SHELL = bool(OPTIONS.get("allow_shell", True))
 ALLOW_STORAGE = bool(OPTIONS.get("allow_storage", True))
+
+CONFIGURED_HA_URL = str(
+    OPTIONS.get("ha_url")
+    or os.environ.get("HA_URL")
+    or "http://homeassistant.local:8123"
+).rstrip("/")
+
+CONFIGURED_HA_TOKEN = str(
+    OPTIONS.get("ha_token")
+    or os.environ.get("HA_TOKEN")
+    or ""
+).strip()
+
+SUPERVISOR_TOKEN = str(
+    os.environ.get("SUPERVISOR_TOKEN")
+    or os.environ.get("HASSIO_TOKEN")
+    or os.environ.get("HOMEASSISTANT_TOKEN")
+    or ""
+).strip()
 
 app = FastAPI(title="ChatGPT Admin Agent", version=AGENT_VERSION)
 
@@ -90,18 +110,44 @@ def create_backup(path: Path) -> Optional[str]:
     return str(backup_path)
 
 
+def ha_api_base_url() -> str:
+    if SUPERVISOR_TOKEN:
+        return SUPERVISOR_CORE_API
+
+    if CONFIGURED_HA_TOKEN:
+        if CONFIGURED_HA_URL.endswith("/api"):
+            return CONFIGURED_HA_URL
+        return f"{CONFIGURED_HA_URL}/api"
+
+    raise HTTPException(
+        status_code=500,
+        detail=(
+            "No Home Assistant API token available. "
+            "Expected SUPERVISOR_TOKEN/HASSIO_TOKEN/HOMEASSISTANT_TOKEN or ha_token in addon options."
+        ),
+    )
+
+
 def ha_headers() -> dict:
-    if not SUPERVISOR_TOKEN:
-        raise HTTPException(status_code=500, detail="SUPERVISOR_TOKEN missing")
+    token = SUPERVISOR_TOKEN or CONFIGURED_HA_TOKEN
+
+    if not token:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "No Home Assistant API token available. "
+                "Expected SUPERVISOR_TOKEN/HASSIO_TOKEN/HOMEASSISTANT_TOKEN or ha_token in addon options."
+            ),
+        )
 
     return {
-        "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
 
 def ha_get(path: str):
-    url = f"{HA_URL}{path}"
+    url = f"{ha_api_base_url()}{path}"
 
     try:
         response = requests.get(url, headers=ha_headers(), timeout=30)
@@ -124,7 +170,7 @@ def ha_get(path: str):
 
 
 def ha_post(path: str, payload: Optional[dict] = None, timeout: int = 30):
-    url = f"{HA_URL}{path}"
+    url = f"{ha_api_base_url()}{path}"
 
     try:
         response = requests.post(
@@ -210,6 +256,10 @@ def health():
         "ok": True,
         "name": "ChatGPT Admin Agent",
         "version": AGENT_VERSION,
+        "supervisor_token_available": bool(SUPERVISOR_TOKEN),
+        "configured_ha_token_available": bool(CONFIGURED_HA_TOKEN),
+        "configured_ha_url": CONFIGURED_HA_URL,
+        "ha_api_base_url": ha_api_base_url() if (SUPERVISOR_TOKEN or CONFIGURED_HA_TOKEN) else None,
     }
 
 
@@ -491,7 +541,7 @@ def ha_render_template(
 
     try:
         response = requests.post(
-            f"{HA_URL}/template",
+            f"{ha_api_base_url()}/template",
             headers=ha_headers(),
             json={"template": req.template},
             timeout=30,
@@ -591,60 +641,74 @@ def ha_check_config(
 ):
     require_auth(x_admin_token, token)
 
-    if not SUPERVISOR_TOKEN:
-        raise HTTPException(status_code=500, detail="SUPERVISOR_TOKEN missing")
-
-    headers = {
-        "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
-    candidates = [
-        f"{SUPERVISOR_URL}/core/check_config",
-        f"{SUPERVISOR_URL}/core/check",
-    ]
-
     errors = []
 
-    for url in candidates:
+    if SUPERVISOR_TOKEN:
+        headers = {
+            "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+            "Content-Type": "application/json",
+        }
+
+        candidates = [
+            f"{SUPERVISOR_URL}/core/check_config",
+            f"{SUPERVISOR_URL}/core/check",
+        ]
+
+        for url in candidates:
+            try:
+                response = requests.post(url, headers=headers, json={}, timeout=120)
+
+                if response.status_code == 404:
+                    errors.append(
+                        {
+                            "url": url,
+                            "status": response.status_code,
+                            "body": response.text,
+                        }
+                    )
+                    continue
+
+                if response.status_code >= 400:
+                    errors.append(
+                        {
+                            "url": url,
+                            "status": response.status_code,
+                            "body": response.text,
+                        }
+                    )
+                    continue
+
+                if response.text:
+                    try:
+                        return response.json()
+                    except Exception:
+                        return {
+                            "ok": True,
+                            "text": response.text,
+                        }
+
+                return {"ok": True}
+
+            except Exception as exc:
+                errors.append(
+                    {
+                        "url": url,
+                        "error": str(exc),
+                    }
+                )
+
+    if CONFIGURED_HA_TOKEN:
         try:
-            response = requests.post(url, headers=headers, json={}, timeout=120)
-
-            if response.status_code == 404:
-                errors.append(
-                    {
-                        "url": url,
-                        "status": response.status_code,
-                        "body": response.text,
-                    }
-                )
-                continue
-
-            if response.status_code >= 400:
-                errors.append(
-                    {
-                        "url": url,
-                        "status": response.status_code,
-                        "body": response.text,
-                    }
-                )
-                continue
-
-            if response.text:
-                try:
-                    return response.json()
-                except Exception:
-                    return {
-                        "ok": True,
-                        "text": response.text,
-                    }
-
-            return {"ok": True}
-
+            result = ha_post("/services/homeassistant/check_config", {}, timeout=120)
+            return {
+                "ok": True,
+                "method": "homeassistant_service",
+                "result": result,
+            }
         except Exception as exc:
             errors.append(
                 {
-                    "url": url,
+                    "method": "homeassistant_service",
                     "error": str(exc),
                 }
             )
@@ -658,7 +722,7 @@ def ha_check_config(
     raise HTTPException(
         status_code=500,
         detail={
-            "message": "No supported Supervisor config-check endpoint worked.",
+            "message": "No supported config-check method worked.",
             "errors": errors,
         },
     )
@@ -731,7 +795,7 @@ def mcp_tools() -> list[dict[str, Any]]:
         },
         {
             "name": "ha_agent_check_config",
-            "description": "Run Home Assistant configuration check through Supervisor if available.",
+            "description": "Run Home Assistant configuration check through Supervisor, HA API or shell fallback.",
             "input_schema": {
                 "type": "object",
                 "properties": {},
