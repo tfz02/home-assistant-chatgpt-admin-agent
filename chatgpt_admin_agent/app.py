@@ -29,7 +29,7 @@ ALLOWED_ROOTS = [
 ]
 
 OPTIONS_PATH = Path("/data/options.json")
-AGENT_VERSION = "0.1.9"
+AGENT_VERSION = "0.1.10"
 
 SUPERVISOR_URL = "http://supervisor"
 SUPERVISOR_CORE_API = "http://supervisor/core/api"
@@ -207,17 +207,26 @@ def ha_get(path: str):
 
 def ha_post(path: str, payload: Optional[dict] = None, timeout: int = 60):
     url = f"{ha_api_base_url()}{path}"
+    body = payload or {}
 
     try:
         response = requests.post(
             url,
             headers=ha_headers(),
-            json=payload or {},
+            json=body,
             timeout=timeout,
         )
 
         if response.status_code >= 400:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(
+                status_code=response.status_code,
+                detail={
+                    "url": url,
+                    "status": response.status_code,
+                    "payload": body,
+                    "response": response.text,
+                },
+            )
 
         if response.text:
             try:
@@ -230,7 +239,14 @@ def ha_post(path: str, payload: Optional[dict] = None, timeout: int = 60):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "url": url,
+                "payload": body,
+                "error": str(exc),
+            },
+        )
 
 
 def supervisor_get(path: str):
@@ -974,11 +990,21 @@ def ha_list_services(
 
 
 def build_service_payload(target: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Home Assistant REST service calls expect service data as the JSON body.
+    For common service targets, entity_id/device_id/area_id must be top-level
+    service-data keys, not nested below {"target": ...}.
+    """
     payload: dict[str, Any] = {}
     payload.update(data or {})
 
-    if target:
-        payload["target"] = target
+    for key in ("entity_id", "device_id", "area_id", "floor_id", "label_id"):
+        if target.get(key) is not None and target.get(key) != "":
+            payload[key] = target[key]
+
+    for key, value in target.items():
+        if key not in payload and key != "target":
+            payload[key] = value
 
     return payload
 
@@ -1316,13 +1342,10 @@ def ha_run_script(
     require_auth(x_admin_token, token)
 
     data = parse_json_object(req.data_json, "data_json")
-    return ha_post(
-        "/services/script/turn_on",
-        {
-            "target": {"entity_id": req.entity_id},
-            **data,
-        },
-    )
+    payload = {"entity_id": req.entity_id}
+    payload.update(data)
+
+    return ha_post("/services/script/turn_on", payload)
 
 
 @app.post("/ha/select_option", operation_id="ha_agent_select_option")
@@ -1336,7 +1359,7 @@ def ha_select_option(
     return ha_post(
         "/services/select/select_option",
         {
-            "target": {"entity_id": req.entity_id},
+            "entity_id": req.entity_id,
             "option": req.option,
         },
     )
@@ -1353,7 +1376,7 @@ def ha_number_set_value(
     return ha_post(
         "/services/number/set_value",
         {
-            "target": {"entity_id": req.entity_id},
+            "entity_id": req.entity_id,
             "value": req.value,
         },
     )
@@ -1370,7 +1393,7 @@ def ha_button_press(
     return ha_post(
         "/services/button/press",
         {
-            "target": {"entity_id": req.entity_id},
+            "entity_id": req.entity_id,
         },
     )
 
@@ -1392,7 +1415,7 @@ def ha_switch_set(
     return ha_post(
         f"/services/switch/{service}",
         {
-            "target": {"entity_id": req.entity_id},
+            "entity_id": req.entity_id,
         },
     )
 
@@ -1411,7 +1434,7 @@ def ha_light_set(
         raise HTTPException(status_code=400, detail="state must be on, off or toggle")
 
     service = "toggle" if wanted == "toggle" else f"turn_{wanted}"
-    payload: dict[str, Any] = {"target": {"entity_id": req.entity_id}}
+    payload: dict[str, Any] = {"entity_id": req.entity_id}
 
     if wanted == "on":
         if req.brightness_pct is not None:
@@ -1443,7 +1466,7 @@ def ha_climate_set_temperature(
     return ha_post(
         "/services/climate/set_temperature",
         {
-            "target": {"entity_id": req.entity_id},
+            "entity_id": req.entity_id,
             "temperature": req.temperature,
         },
     )
@@ -1473,7 +1496,7 @@ def ha_vacuum_command(
         raise HTTPException(status_code=400, detail=f"Unsupported vacuum command: {command}")
 
     payload: dict[str, Any] = {
-        "target": {"entity_id": req.entity_id},
+        "entity_id": req.entity_id,
     }
 
     if command == "set_fan_speed":
