@@ -10,7 +10,7 @@ import requests
 import uvicorn
 import yaml
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 CONFIG_ROOT = Path("/config").resolve()
@@ -29,7 +29,9 @@ ALLOWED_ROOTS = [
 
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 HA_URL = "http://supervisor/core/api"
+SUPERVISOR_URL = "http://supervisor"
 OPTIONS_PATH = Path("/data/options.json")
+AGENT_VERSION = "0.1.7"
 
 
 def load_options() -> dict:
@@ -43,7 +45,7 @@ ADMIN_TOKEN = OPTIONS.get("admin_token", "change-me")
 ALLOW_SHELL = bool(OPTIONS.get("allow_shell", True))
 ALLOW_STORAGE = bool(OPTIONS.get("allow_storage", True))
 
-app = FastAPI(title="ChatGPT Admin Agent", version="0.1.3")
+app = FastAPI(title="ChatGPT Admin Agent", version=AGENT_VERSION)
 
 
 def require_auth(x_admin_token: Optional[str], token: Optional[str] = None) -> None:
@@ -88,6 +90,67 @@ def create_backup(path: Path) -> Optional[str]:
     return str(backup_path)
 
 
+def ha_headers() -> dict:
+    if not SUPERVISOR_TOKEN:
+        raise HTTPException(status_code=500, detail="SUPERVISOR_TOKEN missing")
+
+    return {
+        "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+def ha_get(path: str):
+    url = f"{HA_URL}{path}"
+
+    try:
+        response = requests.get(url, headers=ha_headers(), timeout=30)
+
+        if response.status_code >= 400:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+
+        if response.text:
+            try:
+                return response.json()
+            except Exception:
+                return {"ok": True, "text": response.text}
+
+        return {"ok": True}
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+def ha_post(path: str, payload: Optional[dict] = None, timeout: int = 30):
+    url = f"{HA_URL}{path}"
+
+    try:
+        response = requests.post(
+            url,
+            headers=ha_headers(),
+            json=payload or {},
+            timeout=timeout,
+        )
+
+        if response.status_code >= 400:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+
+        if response.text:
+            try:
+                return response.json()
+            except Exception:
+                return {"ok": True, "text": response.text}
+
+        return {"ok": True}
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 class FilePathRequest(BaseModel):
     relative_path: str
 
@@ -119,8 +182,21 @@ class ShellRequest(BaseModel):
 class ServiceRequest(BaseModel):
     domain: str
     service: str
-    target: dict[str, Any] = {}
-    data: dict[str, Any] = {}
+    target: dict[str, Any] = Field(default_factory=dict)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class DirectServiceRequest(BaseModel):
+    target: dict[str, Any] = Field(default_factory=dict)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class TemplateRequest(BaseModel):
+    template: str
+
+
+class EntityStateRequest(BaseModel):
+    entity_id: str
 
 
 class DeleteRestoreStateRequest(BaseModel):
@@ -128,16 +204,16 @@ class DeleteRestoreStateRequest(BaseModel):
     backup: bool = True
 
 
-@app.get("/health")
+@app.get("/health", operation_id="ha_agent_health")
 def health():
     return {
         "ok": True,
         "name": "ChatGPT Admin Agent",
-        "version": "0.1.3",
+        "version": AGENT_VERSION,
     }
 
 
-@app.post("/fs/read")
+@app.post("/fs/read", operation_id="ha_agent_read_file")
 def fs_read(
     req: FilePathRequest,
     x_admin_token: Optional[str] = Header(None),
@@ -159,7 +235,7 @@ def fs_read(
     }
 
 
-@app.post("/fs/write")
+@app.post("/fs/write", operation_id="ha_agent_write_file")
 def fs_write(
     req: WriteFileRequest,
     x_admin_token: Optional[str] = Header(None),
@@ -181,7 +257,7 @@ def fs_write(
     }
 
 
-@app.post("/fs/replace")
+@app.post("/fs/replace", operation_id="ha_agent_replace_in_file")
 def fs_replace(
     req: ReplaceInFileRequest,
     x_admin_token: Optional[str] = Header(None),
@@ -218,7 +294,7 @@ def fs_replace(
     }
 
 
-@app.post("/fs/grep")
+@app.post("/fs/grep", operation_id="ha_agent_grep_file")
 def fs_grep(
     req: GrepRequest,
     x_admin_token: Optional[str] = Header(None),
@@ -247,7 +323,7 @@ def fs_grep(
     }
 
 
-@app.post("/yaml/validate")
+@app.post("/yaml/validate", operation_id="ha_agent_validate_yaml")
 def yaml_validate(
     req: FilePathRequest,
     x_admin_token: Optional[str] = Header(None),
@@ -265,7 +341,7 @@ def yaml_validate(
     return {"ok": True}
 
 
-@app.post("/json/validate")
+@app.post("/json/validate", operation_id="ha_agent_validate_json")
 def json_validate(
     req: FilePathRequest,
     x_admin_token: Optional[str] = Header(None),
@@ -283,7 +359,7 @@ def json_validate(
     return {"ok": True}
 
 
-@app.post("/restore_state/delete_entity")
+@app.post("/restore_state/delete_entity", operation_id="ha_agent_delete_restore_state_entity")
 def restore_state_delete_entity(
     req: DeleteRestoreStateRequest,
     x_admin_token: Optional[str] = Header(None),
@@ -331,7 +407,45 @@ def restore_state_delete_entity(
     }
 
 
-@app.post("/ha/call_service")
+@app.get("/ha/states", operation_id="ha_agent_get_states")
+def ha_get_states(
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
+    return ha_get("/states")
+
+
+@app.get("/ha/states/{entity_id}", operation_id="ha_agent_get_state")
+def ha_get_state_by_path(
+    entity_id: str,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
+    return ha_get(f"/states/{entity_id}")
+
+
+@app.post("/ha/get_state", operation_id="ha_agent_get_state_post")
+def ha_get_state(
+    req: EntityStateRequest,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
+    return ha_get(f"/states/{req.entity_id}")
+
+
+@app.get("/ha/services", operation_id="ha_agent_list_services")
+def ha_list_services(
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
+    return ha_get("/services")
+
+
+@app.post("/ha/call_service", operation_id="ha_agent_call_service")
 def ha_call_service(
     req: ServiceRequest,
     x_admin_token: Optional[str] = Header(None),
@@ -339,61 +453,89 @@ def ha_call_service(
 ):
     require_auth(x_admin_token, token)
 
-    if not SUPERVISOR_TOKEN:
-        raise HTTPException(status_code=500, detail="SUPERVISOR_TOKEN missing")
-
-    headers = {
-        "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
-    payload = {}
+    payload: dict[str, Any] = {}
     payload.update(req.data or {})
 
     if req.target:
         payload["target"] = req.target
 
-    url = f"{HA_URL}/services/{req.domain}/{req.service}"
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
-
-    if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
-
-    if response.text:
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "text": response.text}
-
-    return {"ok": True}
+    return ha_post(f"/services/{req.domain}/{req.service}", payload)
 
 
-@app.post("/ha/reload_automations")
-def ha_reload_automations(
+@app.post("/ha/services/{domain}/{service}", operation_id="ha_agent_call_service_direct")
+def ha_call_service_direct(
+    domain: str,
+    service: str,
+    req: DirectServiceRequest,
     x_admin_token: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
 ):
     require_auth(x_admin_token, token)
 
-    if not SUPERVISOR_TOKEN:
-        raise HTTPException(status_code=500, detail="SUPERVISOR_TOKEN missing")
+    payload: dict[str, Any] = {}
+    payload.update(req.data or {})
 
-    headers = {
-        "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
-        "Content-Type": "application/json",
-    }
+    if req.target:
+        payload["target"] = req.target
 
-    response = requests.post(
-        f"{HA_URL}/services/automation/reload",
-        headers=headers,
-        json={},
-        timeout=30,
-    )
+    return ha_post(f"/services/{domain}/{service}", payload)
 
-    if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
 
-    return {"ok": True}
+@app.post("/ha/template", operation_id="ha_agent_render_template")
+def ha_render_template(
+    req: TemplateRequest,
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
+
+    try:
+        response = requests.post(
+            f"{HA_URL}/template",
+            headers=ha_headers(),
+            json={"template": req.template},
+            timeout=30,
+        )
+
+        if response.status_code >= 400:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+
+        return {
+            "ok": True,
+            "result": response.text,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/ha/reload_scripts", operation_id="ha_agent_reload_scripts")
+def ha_reload_scripts(
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
+    return ha_post("/services/script/reload", {})
+
+
+@app.post("/ha/reload_automations", operation_id="ha_agent_reload_automations")
+def ha_reload_automations(
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
+    return ha_post("/services/automation/reload", {})
+
+
+@app.post("/ha/reload_core_config", operation_id="ha_agent_reload_core_config")
+def ha_reload_core_config(
+    x_admin_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    require_auth(x_admin_token, token)
+    return ha_post("/services/homeassistant/reload_core_config", {})
 
 
 def run_shell(command: str, cwd: str, timeout: int):
@@ -428,7 +570,7 @@ def run_shell(command: str, cwd: str, timeout: int):
     }
 
 
-@app.post("/shell/exec")
+@app.post("/shell/exec", operation_id="ha_agent_shell_exec")
 def shell_exec(
     req: ShellRequest,
     x_admin_token: Optional[str] = Header(None),
@@ -442,95 +584,275 @@ def shell_exec(
     return run_shell(req.command, req.cwd, req.timeout)
 
 
-@app.post("/ha/check_config")
+@app.post("/ha/check_config", operation_id="ha_agent_check_config")
 def ha_check_config(
     x_admin_token: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
 ):
     require_auth(x_admin_token, token)
 
-    if not ALLOW_SHELL:
-        raise HTTPException(status_code=403, detail="Shell access disabled")
+    if not SUPERVISOR_TOKEN:
+        raise HTTPException(status_code=500, detail="SUPERVISOR_TOKEN missing")
 
-    return run_shell("ha core check", "/config", 120)
+    headers = {
+        "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    candidates = [
+        f"{SUPERVISOR_URL}/core/check_config",
+        f"{SUPERVISOR_URL}/core/check",
+    ]
+
+    errors = []
+
+    for url in candidates:
+        try:
+            response = requests.post(url, headers=headers, json={}, timeout=120)
+
+            if response.status_code == 404:
+                errors.append(
+                    {
+                        "url": url,
+                        "status": response.status_code,
+                        "body": response.text,
+                    }
+                )
+                continue
+
+            if response.status_code >= 400:
+                errors.append(
+                    {
+                        "url": url,
+                        "status": response.status_code,
+                        "body": response.text,
+                    }
+                )
+                continue
+
+            if response.text:
+                try:
+                    return response.json()
+                except Exception:
+                    return {
+                        "ok": True,
+                        "text": response.text,
+                    }
+
+            return {"ok": True}
+
+        except Exception as exc:
+            errors.append(
+                {
+                    "url": url,
+                    "error": str(exc),
+                }
+            )
+
+    if ALLOW_SHELL:
+        fallback = run_shell("ha core check", "/config", 120)
+        fallback["fallback"] = "shell"
+        fallback["supervisor_errors"] = errors
+        return fallback
+
+    raise HTTPException(
+        status_code=500,
+        detail={
+            "message": "No supported Supervisor config-check endpoint worked.",
+            "errors": errors,
+        },
+    )
+
+
+def mcp_tools() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "ha_agent_health",
+            "description": "Check whether the ChatGPT Admin Agent is reachable.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_read_file",
+            "description": "Read a Home Assistant file from an allowed path.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "relative_path": {"type": "string"},
+                },
+                "required": ["relative_path"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_write_file",
+            "description": "Write a Home Assistant file with optional backup.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "relative_path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "backup": {"type": "boolean", "default": True},
+                },
+                "required": ["relative_path", "content"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_replace_in_file",
+            "description": "Replace text in a Home Assistant config file with backup.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "relative_path": {"type": "string"},
+                    "search": {"type": "string"},
+                    "replace": {"type": "string"},
+                    "backup": {"type": "boolean", "default": True},
+                },
+                "required": ["relative_path", "search", "replace"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_grep_file",
+            "description": "Search for text in a Home Assistant config file.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "relative_path": {"type": "string"},
+                    "search": {"type": "string"},
+                },
+                "required": ["relative_path", "search"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_check_config",
+            "description": "Run Home Assistant configuration check through Supervisor if available.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_reload_automations",
+            "description": "Reload Home Assistant automations.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_reload_scripts",
+            "description": "Reload Home Assistant scripts.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_reload_core_config",
+            "description": "Reload Home Assistant core configuration.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_get_states",
+            "description": "Get all Home Assistant entity states.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_get_state",
+            "description": "Get one Home Assistant entity state.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string"},
+                },
+                "required": ["entity_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_list_services",
+            "description": "List Home Assistant services.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_call_service",
+            "description": "Call a Home Assistant service.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "domain": {"type": "string"},
+                    "service": {"type": "string"},
+                    "target": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "default": {},
+                    },
+                    "data": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "default": {},
+                    },
+                },
+                "required": ["domain", "service"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_render_template",
+            "description": "Render a Home Assistant Jinja template.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "template": {"type": "string"},
+                },
+                "required": ["template"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "ha_agent_delete_restore_state_entity",
+            "description": "Delete a restored entity from Home Assistant restore state.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string"},
+                    "backup": {"type": "boolean", "default": True},
+                },
+                "required": ["entity_id"],
+                "additionalProperties": False,
+            },
+        },
+    ]
 
 
 @app.get("/mcp")
 def mcp_get():
     return {
         "name": "ChatGPT Admin Agent",
-        "version": "0.1.3",
+        "version": AGENT_VERSION,
         "description": "Home Assistant admin MCP endpoint",
-        "tools": [
-            {
-                "name": "ha_agent_health",
-                "description": "Check whether the ChatGPT Admin Agent is reachable.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "ha_agent_replace_in_file",
-                "description": "Replace text in a Home Assistant config file with backup.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "relative_path": {"type": "string"},
-                        "search": {"type": "string"},
-                        "replace": {"type": "string"},
-                        "backup": {"type": "boolean", "default": True},
-                    },
-                    "required": ["relative_path", "search", "replace"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "ha_agent_grep_file",
-                "description": "Search for text in a Home Assistant config file.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "relative_path": {"type": "string"},
-                        "search": {"type": "string"},
-                    },
-                    "required": ["relative_path", "search"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "ha_agent_check_config",
-                "description": "Run Home Assistant configuration check.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "ha_agent_reload_automations",
-                "description": "Reload Home Assistant automations.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "ha_agent_delete_restore_state_entity",
-                "description": "Delete a restored entity from Home Assistant restore state.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "entity_id": {"type": "string"},
-                        "backup": {"type": "boolean", "default": True},
-                    },
-                    "required": ["entity_id"],
-                    "additionalProperties": False,
-                },
-            },
-        ],
+        "tools": mcp_tools(),
     }
 
 
@@ -557,7 +879,7 @@ async def mcp_post(
                     },
                     "serverInfo": {
                         "name": "ChatGPT Admin Agent",
-                        "version": "0.1.3",
+                        "version": AGENT_VERSION,
                     },
                 },
             }
@@ -588,6 +910,18 @@ async def mcp_post(
             if name == "ha_agent_health":
                 result = health()
 
+            elif name == "ha_agent_read_file":
+                result = fs_read(
+                    FilePathRequest(**arguments),
+                    x_admin_token=auth_value,
+                )
+
+            elif name == "ha_agent_write_file":
+                result = fs_write(
+                    WriteFileRequest(**arguments),
+                    x_admin_token=auth_value,
+                )
+
             elif name == "ha_agent_replace_in_file":
                 result = fs_replace(
                     ReplaceInFileRequest(**arguments),
@@ -605,6 +939,36 @@ async def mcp_post(
 
             elif name == "ha_agent_reload_automations":
                 result = ha_reload_automations(x_admin_token=auth_value)
+
+            elif name == "ha_agent_reload_scripts":
+                result = ha_reload_scripts(x_admin_token=auth_value)
+
+            elif name == "ha_agent_reload_core_config":
+                result = ha_reload_core_config(x_admin_token=auth_value)
+
+            elif name == "ha_agent_get_states":
+                result = ha_get_states(x_admin_token=auth_value)
+
+            elif name == "ha_agent_get_state":
+                result = ha_get_state(
+                    EntityStateRequest(**arguments),
+                    x_admin_token=auth_value,
+                )
+
+            elif name == "ha_agent_list_services":
+                result = ha_list_services(x_admin_token=auth_value)
+
+            elif name == "ha_agent_call_service":
+                result = ha_call_service(
+                    ServiceRequest(**arguments),
+                    x_admin_token=auth_value,
+                )
+
+            elif name == "ha_agent_render_template":
+                result = ha_render_template(
+                    TemplateRequest(**arguments),
+                    x_admin_token=auth_value,
+                )
 
             elif name == "ha_agent_delete_restore_state_entity":
                 result = restore_state_delete_entity(
